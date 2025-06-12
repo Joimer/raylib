@@ -128,6 +128,7 @@ ROOT = $(shell whoami)
 # By default we suppose we are working on Windows
 HOST_PLATFORM_OS ?= WINDOWS
 PLATFORM_OS ?= WINDOWS
+TARGET_OS ?= SAME
 
 # Determine PLATFORM_OS when required
 ifeq ($(TARGET_PLATFORM),$(filter $(TARGET_PLATFORM),PLATFORM_DESKTOP_GLFW PLATFORM_DESKTOP_SDL PLATFORM_DESKTOP_RGFW PLATFORM_WEB PLATFORM_WEB_RGFW PLATFORM_ANDROID))
@@ -279,6 +280,11 @@ ifeq ($(TARGET_PLATFORM),PLATFORM_DESKTOP_GLFW)
         # FreeBSD, OpenBSD, NetBSD, DragonFly default compiler
         CC = clang
     endif
+    ifeq ($(PLATFORM_OS),LINUX)
+        ifeq ($(TARGET_OS),WINDOWS)
+            CC = x86_64-w64-mingw32-gcc
+        endif
+    endif
 endif
 ifeq ($(TARGET_PLATFORM),PLATFORM_DRM)
     ifeq ($(USE_RPI_CROSS_COMPILER),TRUE)
@@ -339,7 +345,9 @@ else
 endif
 
 ifeq ($(PLATFORM_OS), LINUX)
-    CFLAGS += -fPIC
+    ifneq ($(TARGET_OS),WINDOWS)
+        CFLAGS += -fPIC
+    endif
 endif
 
 ifeq ($(RAYLIB_BUILD_MODE),DEBUG)
@@ -433,7 +441,9 @@ endif
 ifeq ($(TARGET_PLATFORM),PLATFORM_DESKTOP_GLFW)
     ifeq ($(PLATFORM_OS), LINUX)
         ifeq ($(GLFW_LINUX_ENABLE_X11),TRUE)
-            CFLAGS += -D_GLFW_X11
+            ifneq ($(TARGET_OS),WINDOWS)
+                CFLAGS += -D_GLFW_X11
+            endif
         endif
         ifeq ($(GLFW_LINUX_ENABLE_WAYLAND),TRUE)
             CFLAGS += -D_GLFW_WAYLAND
@@ -514,7 +524,7 @@ endif
 LDFLAGS = $(CUSTOM_LDFLAGS) -L. -L$(RAYLIB_RELEASE_PATH)
 
 ifeq ($(TARGET_PLATFORM),PLATFORM_DESKTOP_GLFW)
-    ifeq ($(PLATFORM_OS),WINDOWS)
+    ifeq ($(TARGET_OS),WINDOWS)
         ifneq ($(CC), tcc)
             LDFLAGS += -Wl,--out-implib,$(RAYLIB_RELEASE_PATH)/lib$(RAYLIB_LIB_NAME)dll.a
         endif
@@ -523,7 +533,11 @@ ifeq ($(TARGET_PLATFORM),PLATFORM_DESKTOP_GLFW)
         LDFLAGS += -compatibility_version $(RAYLIB_API_VERSION) -current_version $(RAYLIB_VERSION)
     endif
     ifeq ($(PLATFORM_OS),LINUX)
-        LDFLAGS += -Wl,-soname,lib$(RAYLIB_LIB_NAME).so.$(RAYLIB_API_VERSION)
+        ifeq ($(TARGET_OS),WINDOWS)
+            LDFLAGS += -Wl,--out-implib,$(RAYLIB_RELEASE_PATH)/lib$(RAYLIB_LIB_NAME)dll.a
+        else
+            LDFLAGS += -Wl,-soname,lib$(RAYLIB_LIB_NAME).so.$(RAYLIB_API_VERSION)
+        endif
     endif
     ifeq ($(PLATFORM_OS),BSD)
         LDFLAGS += -Wl,-soname,lib$(RAYLIB_LIB_NAME).$(RAYLIB_API_VERSION).so -Lsrc -L/usr/local/lib -L/usr/pkg/lib -Wl,-R/usr/pkg/lib
@@ -567,12 +581,16 @@ ifeq ($(TARGET_PLATFORM),PLATFORM_DESKTOP_GLFW)
         endif
     endif
     ifeq ($(PLATFORM_OS),LINUX)
-        LDLIBS = -lGL -lc -lm -lpthread -ldl -lrt
-        ifeq ($(GLFW_LINUX_ENABLE_X11),TRUE)
-            LDLIBS += -lX11
+        ifeq ($(TARGET_OS),WINDOWS)
+            LDLIBS = -static-libgcc -lopengl32 -lgdi32 -lwinmm
+        else
+            LDLIBS = -lGL -lc -lm -lpthread -ldl -lrt
+            ifeq ($(GLFW_LINUX_ENABLE_X11),TRUE)
+                LDLIBS += -lX11
+            endif
+            # TODO: On ARM 32bit arch, miniaudio requires atomics library
+            #LDLIBS += -latomic
         endif
-        # TODO: On ARM 32bit arch, miniaudio requires atomics library
-        #LDLIBS += -latomic
     endif
     ifeq ($(PLATFORM_OS),OSX)
         LDLIBS = -framework OpenGL -framework Cocoa -framework IOKit -framework CoreAudio -framework CoreVideo
@@ -591,9 +609,13 @@ ifeq ($(TARGET_PLATFORM),PLATFORM_DESKTOP_SDL)
         LDLIBS = -static-libgcc -lopengl32 -lgdi32
     endif
     ifeq ($(PLATFORM_OS),LINUX)
-        LDLIBS = -lGL -lc -lm -lpthread -ldl -lrt
-        ifeq ($(USE_WAYLAND_DISPLAY),FALSE)
-            LDLIBS += -lX11
+        ifeq ($(TARGET_OS),WINDOWS)
+            LDLIBS = -static-libgcc -lopengl32 -lgdi32
+        else
+            LDLIBS = -lGL -lc -lm -lpthread -ldl -lrt
+            ifeq ($(USE_WAYLAND_DISPLAY),FALSE)
+                LDLIBS += -lX11
+            endif
         endif
     endif
     LDLIBS += $(SDL_LIBRARIES)
@@ -604,17 +626,21 @@ ifeq ($(TARGET_PLATFORM),PLATFORM_DESKTOP_RGFW)
         LDLIBS = -lgdi32 -lwinmm -lopengl32
     endif
     ifeq ($(PLATFORM_OS),LINUX)
-        # Libraries for Debian GNU/Linux desktop compipling
-        # NOTE: Required packages: libegl1-mesa-dev
-        LDLIBS = -lGL -lX11 -lXrandr -lXinerama -lXi -lXcursor -lm -lpthread -ldl -lrt
+        ifeq ($(TARGET_OS),WINDOWS)
+            LDLIBS = -lgdi32 -lwinmm -lopengl32
+        else
+            # Libraries for Debian GNU/Linux desktop compiling
+            # NOTE: Required packages: libegl1-mesa-dev
+            LDLIBS = -lGL -lX11 -lXrandr -lXinerama -lXi -lXcursor -lm -lpthread -ldl -lrt
 
-        # Explicit link to libc
-        ifeq ($(RAYLIB_LIBTYPE),SHARED)
-            LDLIBS += -lc
+            # Explicit link to libc
+            ifeq ($(RAYLIB_LIBTYPE),SHARED)
+                LDLIBS += -lc
+            endif
+
+            # NOTE: On ARM 32bit arch, miniaudio requires atomics library
+            LDLIBS += -latomic
         endif
-
-        # NOTE: On ARM 32bit arch, miniaudio requires atomics library
-        LDLIBS += -latomic
     endif
     ifeq ($(PLATFORM_OS),OSX)
         # Libraries for Debian MacOS desktop compiling
@@ -680,16 +706,22 @@ else
         ifeq ($(TARGET_PLATFORM),$(filter $(TARGET_PLATFORM),PLATFORM_DESKTOP_GLFW PLATFORM_DESKTOP_SDL PLATFORM_DESKTOP_RGFW))
             ifeq ($(PLATFORM_OS),WINDOWS)
                 # NOTE: Linking with provided resource file
-				$(CC) -shared -o $(RAYLIB_RELEASE_PATH)/$(RAYLIB_LIB_NAME).dll $(OBJS) $(RAYLIB_RES_FILE) $(LDFLAGS) $(LDLIBS)
-				@echo "raylib dynamic library ($(RAYLIB_LIB_NAME).dll) and import library (lib$(RAYLIB_LIB_NAME)dll.a) generated!"
+                $(CC) -shared -o $(RAYLIB_RELEASE_PATH)/$(RAYLIB_LIB_NAME).dll $(OBJS) $(RAYLIB_RES_FILE) $(LDFLAGS) $(LDLIBS)
+                @echo "raylib dynamic library ($(RAYLIB_LIB_NAME).dll) and import library (lib$(RAYLIB_LIB_NAME)dll.a) generated!"
             endif
             ifeq ($(PLATFORM_OS),LINUX)
-                # Compile raylib shared library version $(RAYLIB_VERSION).
-                # WARNING: you should type "make clean" before doing this target
-				$(CC) -shared -o $(RAYLIB_RELEASE_PATH)/lib$(RAYLIB_LIB_NAME).so.$(RAYLIB_VERSION) $(OBJS) $(LDFLAGS) $(LDLIBS)
-				@echo "raylib shared library generated (lib$(RAYLIB_LIB_NAME).so.$(RAYLIB_VERSION)) in $(RAYLIB_RELEASE_PATH)!"
-				cd $(RAYLIB_RELEASE_PATH) && ln -fsv lib$(RAYLIB_LIB_NAME).so.$(RAYLIB_VERSION) lib$(RAYLIB_LIB_NAME).so.$(RAYLIB_API_VERSION)
-				cd $(RAYLIB_RELEASE_PATH) && ln -fsv lib$(RAYLIB_LIB_NAME).so.$(RAYLIB_API_VERSION) lib$(RAYLIB_LIB_NAME).so
+                ifeq ($(TARGET_OS),WINDOWS)
+                     # NOTE: Linking with provided resource file
+                     $(CC) -shared -o $(RAYLIB_RELEASE_PATH)/$(RAYLIB_LIB_NAME).dll $(OBJS) $(RAYLIB_RES_FILE) $(LDFLAGS) $(LDLIBS)
+                     @echo "raylib dynamic library ($(RAYLIB_LIB_NAME).dll) and import library (lib$(RAYLIB_LIB_NAME)dll.a) generated!"
+                else
+                    # Compile raylib shared library version $(RAYLIB_VERSION).
+                    # WARNING: you should type "make clean" before doing this target
+                    $(CC) -shared -o $(RAYLIB_RELEASE_PATH)/lib$(RAYLIB_LIB_NAME).so.$(RAYLIB_VERSION) $(OBJS) $(LDFLAGS) $(LDLIBS)
+                    @echo "raylib shared library generated (lib$(RAYLIB_LIB_NAME).so.$(RAYLIB_VERSION)) in $(RAYLIB_RELEASE_PATH)!"
+                    cd $(RAYLIB_RELEASE_PATH) && ln -fsv lib$(RAYLIB_LIB_NAME).so.$(RAYLIB_VERSION) lib$(RAYLIB_LIB_NAME).so.$(RAYLIB_API_VERSION)
+                    cd $(RAYLIB_RELEASE_PATH) && ln -fsv lib$(RAYLIB_LIB_NAME).so.$(RAYLIB_API_VERSION) lib$(RAYLIB_LIB_NAME).so
+                endif
             endif
             ifeq ($(PLATFORM_OS),OSX)
 				$(CC) -dynamiclib -o $(RAYLIB_RELEASE_PATH)/lib$(RAYLIB_LIB_NAME).$(RAYLIB_VERSION).dylib $(OBJS) $(LDFLAGS) $(LDLIBS)
