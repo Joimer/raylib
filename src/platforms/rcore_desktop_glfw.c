@@ -112,7 +112,8 @@ void ClosePlatform(void);        // Close platform
 static void ErrorCallback(int error, const char *description);                             // GLFW3 Error Callback, runs on GLFW3 error
 
 // Window callbacks events
-static void WindowSizeCallback(GLFWwindow *window, int width, int height);                 // GLFW3 WindowSize Callback, runs when window is resized
+//static void WindowSizeCallback(GLFWwindow *window, int width, int height);                 // GLFW3 WindowSize Callback, runs when window is resized
+static void FramebufferSizeCallback(GLFWwindow *window, int width, int height);            // GLFW3 FramebufferSize Callback, runs when window is resized
 static void WindowPosCallback(GLFWwindow* window, int x, int y);                     // GLFW3 WindowPos Callback, runs when window is moved
 static void WindowIconifyCallback(GLFWwindow *window, int iconified);                      // GLFW3 WindowIconify Callback, runs when window is minimized/restored
 static void WindowMaximizeCallback(GLFWwindow* window, int maximized);                     // GLFW3 Window Maximize Callback, runs when window is maximized
@@ -182,7 +183,6 @@ void ToggleFullscreen(void)
 
             glfwSetWindowMonitor(platform.handle, monitor, 0, 0, CORE.Window.screen.width, CORE.Window.screen.height, GLFW_DONT_CARE);
         }
-
     }
     else
     {
@@ -735,7 +735,8 @@ int GetCurrentMonitor(void)
 
     if (monitorCount >= 1)
     {
-        if (IsWindowFullscreen())
+        // Wayland does not have access to window position. Instead, focused monitor is always primary.
+        if (IsWindowFullscreen() || glfwGetPlatform() == GLFW_PLATFORM_WAYLAND)
         {
             // Get the handle of the monitor that the specified window is in full screen on
             monitor = glfwGetWindowMonitor(platform.handle);
@@ -1529,6 +1530,12 @@ int InitPlatform(void)
     }
     else
     {
+        // On Wayland, main monitor is the one with the window focus. Cannot get window position.
+        if (glfwGetPlatform() == GLFW_PLATFORM_WAYLAND)
+        {
+            monitor = glfwGetPrimaryMonitor();
+        }
+
         // No-fullscreen window creation
         bool requestWindowedFullscreen = (CORE.Window.screen.height == 0) && (CORE.Window.screen.width == 0);
 
@@ -1536,7 +1543,7 @@ int InitPlatform(void)
         int creationWidth = CORE.Window.screen.width != 0 ? CORE.Window.screen.width : 1;
         int creationHeight = CORE.Window.screen.height != 0 ? CORE.Window.screen.height : 1;
 
-        platform.handle = glfwCreateWindow(creationWidth, creationHeight, (CORE.Window.title != 0)? CORE.Window.title : " ", NULL, NULL);
+        platform.handle = glfwCreateWindow(creationWidth, creationHeight, (CORE.Window.title != 0)? CORE.Window.title : " ", monitor, NULL);
         if (!platform.handle)
         {
             glfwTerminate();
@@ -1546,24 +1553,26 @@ int InitPlatform(void)
 
         // After the window was created, determine the monitor that the window manager assigned.
         // Derive display sizes, and, if possible, window size in case it was zero at beginning.
-
-        int monitorCount = 0;
-        int monitorIndex = GetCurrentMonitor();
-        GLFWmonitor **monitors = glfwGetMonitors(&monitorCount);
-
-        if (monitorIndex < monitorCount)
+        if (monitor == NULL)
         {
-            monitor = monitors[monitorIndex];
-            SetDimensionsFromMonitor(monitor);
+            int monitorCount = 0;
+            int monitorIndex = GetCurrentMonitor();
+            GLFWmonitor **monitors = glfwGetMonitors(&monitorCount);
 
-            if (requestWindowedFullscreen) glfwSetWindowSize(platform.handle, CORE.Window.screen.width, CORE.Window.screen.height);
-        }
-        else
-        {
-            // The monitor for the window-manager-created window can not be determined, so it can not be centered.
-            glfwTerminate();
-            TRACELOG(LOG_WARNING, "GLFW: Failed to determine Monitor to center Window");
-            return -1;
+            if (monitorIndex < monitorCount)
+            {
+                monitor = monitors[monitorIndex];
+                SetDimensionsFromMonitor(monitor);
+
+                if (requestWindowedFullscreen) glfwSetWindowSize(platform.handle, CORE.Window.screen.width, CORE.Window.screen.height);
+            }
+            else
+            {
+                // The monitor for the window-manager-created window can not be determined, so it can not be centered.
+                glfwTerminate();
+                TRACELOG(LOG_WARNING, "GLFW: Failed to determine Monitor to center Window");
+                return -1;
+            }
         }
 
         CORE.Window.render.width = CORE.Window.screen.width;
@@ -1658,7 +1667,7 @@ int InitPlatform(void)
     // Initialize input events callbacks
     //----------------------------------------------------------------------------
     // Set window callback events
-    glfwSetWindowSizeCallback(platform.handle, WindowSizeCallback);      // NOTE: Resizing not allowed by default!
+    glfwSetFramebufferSizeCallback(platform.handle, FramebufferSizeCallback); // NOTE: Resizing not allowed by default!
     glfwSetWindowPosCallback(platform.handle, WindowPosCallback);
     glfwSetWindowMaximizeCallback(platform.handle, WindowMaximizeCallback);
     glfwSetWindowIconifyCallback(platform.handle, WindowIconifyCallback);
@@ -1738,9 +1747,9 @@ static void ErrorCallback(int error, const char *description)
     TRACELOG(LOG_WARNING, "GLFW: Error: %i Description: %s", error, description);
 }
 
-// GLFW3 WindowSize Callback, runs when window is resizedLastFrame
+// GLFW3 FramebufferSize Callback, runs when buffer size changed
 // NOTE: Window resizing not enabled by default, use SetConfigFlags()
-static void WindowSizeCallback(GLFWwindow *window, int width, int height)
+static void FramebufferSizeCallback(GLFWwindow *window, int width, int height)
 {
     // WARNING: On window minimization, callback is called,
     // but we don't want to change internal screen values, it breaks things
@@ -1752,8 +1761,6 @@ static void WindowSizeCallback(GLFWwindow *window, int width, int height)
     CORE.Window.currentFbo.width = width;
     CORE.Window.currentFbo.height = height;
     CORE.Window.resizedLastFrame = true;
-
-    if (IsWindowFullscreen()) return;
 
     // if we are doing automatic DPI scaling, then the "screen" size is divided by the window scale
     if (IsWindowState(FLAG_WINDOW_HIGHDPI))
@@ -1769,9 +1776,8 @@ static void WindowSizeCallback(GLFWwindow *window, int width, int height)
     // Set current screen size
     CORE.Window.screen.width = width;
     CORE.Window.screen.height = height;
-
-    // WARNING: If using a render texture, it is not scaled to new size
 }
+
 static void WindowPosCallback(GLFWwindow* window, int x, int y)
 {
     // Set current window position
