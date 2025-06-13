@@ -49,6 +49,7 @@
 *
 **********************************************************************************************/
 
+#include <stdbool.h>
 #define GLFW_INCLUDE_NONE       // Disable the standard OpenGL header inclusion on GLFW3
                                 // NOTE: Already provided by rlgl implementation (on glad.h)
 #include "GLFW/glfw3.h"         // GLFW3 library: Windows, OpenGL context and Input management
@@ -152,6 +153,19 @@ bool WindowShouldClose(void)
     else return true;
 }
 
+static void SetFullscreenOff(void)
+{
+    CORE.Window.fullscreen = false;
+    CORE.Window.flags &= ~FLAG_FULLSCREEN_MODE;
+
+    glfwSetWindowMonitor(platform.handle, NULL, CORE.Window.previousPosition.x, CORE.Window.previousPosition.y, CORE.Window.previousScreen.width, CORE.Window.previousScreen.height, GLFW_DONT_CARE);
+    CORE.Window.screen = CORE.Window.previousScreen;
+
+    // We update the window position right away
+    CORE.Window.position.x = CORE.Window.previousPosition.x;
+    CORE.Window.position.y = CORE.Window.previousPosition.y;
+}
+
 // Toggle fullscreen mode
 void ToggleFullscreen(void)
 {
@@ -159,6 +173,7 @@ void ToggleFullscreen(void)
     {
         // Store previous window position (in case we exit fullscreen)
         CORE.Window.previousPosition = CORE.Window.position;
+        CORE.Window.previousScreen = CORE.Window.screen;
 
         int monitorCount = 0;
         int monitorIndex = GetCurrentMonitor();
@@ -169,31 +184,29 @@ void ToggleFullscreen(void)
 
         if (monitor == NULL)
         {
-            TRACELOG(LOG_WARNING, "GLFW: Failed to get monitor");
-
-            CORE.Window.fullscreen = false;
-            CORE.Window.flags &= ~FLAG_FULLSCREEN_MODE;
-
-            glfwSetWindowMonitor(platform.handle, NULL, 0, 0, CORE.Window.screen.width, CORE.Window.screen.height, GLFW_DONT_CARE);
+            SetFullscreenOff();
         }
         else
         {
-            CORE.Window.fullscreen = true;
-            CORE.Window.flags |= FLAG_FULLSCREEN_MODE;
+            const GLFWvidmode *mode = glfwGetVideoMode(monitor);
+            if (mode == NULL)
+            {
+                SetFullscreenOff();
+            }
+            else
+            {
+                CORE.Window.fullscreen = true;
+                CORE.Window.flags |= FLAG_FULLSCREEN_MODE;
 
-            glfwSetWindowMonitor(platform.handle, monitor, 0, 0, CORE.Window.screen.width, CORE.Window.screen.height, GLFW_DONT_CARE);
+                glfwSetWindowMonitor(platform.handle, monitor, 0, 0, mode->width, mode->height, GLFW_DONT_CARE);
+                CORE.Window.screen.width = mode->width;
+                CORE.Window.screen.height = mode->height;
+            }
         }
     }
     else
     {
-        CORE.Window.fullscreen = false;
-        CORE.Window.flags &= ~FLAG_FULLSCREEN_MODE;
-
-        glfwSetWindowMonitor(platform.handle, NULL, CORE.Window.previousPosition.x, CORE.Window.previousPosition.y, CORE.Window.screen.width, CORE.Window.screen.height, GLFW_DONT_CARE);
-
-        // we update the window position right away
-        CORE.Window.position.x = CORE.Window.previousPosition.x;
-        CORE.Window.position.y = CORE.Window.previousPosition.y;
+        SetFullscreenOff();
     }
 
     // Try to enable GPU V-Sync, so frames are limited to screen refresh rate (60Hz -> 60 FPS)
@@ -736,7 +749,20 @@ int GetCurrentMonitor(void)
     if (monitorCount >= 1)
     {
         // Wayland does not have access to window position. Instead, focused monitor is always primary.
-        if (IsWindowFullscreen() || glfwGetPlatform() == GLFW_PLATFORM_WAYLAND)
+        if (glfwGetPlatform() == GLFW_PLATFORM_WAYLAND)
+        {
+            monitor = glfwGetPrimaryMonitor();
+
+            for (int i = 0; i < monitorCount; i++)
+            {
+                if (monitors[i] == monitor)
+                {
+                    index = i;
+                    break;
+                }
+            }
+        }
+        else if (IsWindowFullscreen())
         {
             // Get the handle of the monitor that the specified window is in full screen on
             monitor = glfwGetWindowMonitor(platform.handle);
@@ -942,7 +968,7 @@ Vector2 GetWindowPosition(void)
 // Get window scale DPI factor for current monitor
 Vector2 GetWindowScaleDPI(void)
 {
-    Vector2 scale = {0};
+    Vector2 scale = { 1.0f, 1.0f };
     glfwGetWindowContentScale(platform.handle, &scale.x, &scale.y);
     return scale;
 }
@@ -1530,12 +1556,6 @@ int InitPlatform(void)
     }
     else
     {
-        // On Wayland, main monitor is the one with the window focus. Cannot get window position.
-        if (glfwGetPlatform() == GLFW_PLATFORM_WAYLAND)
-        {
-            monitor = glfwGetPrimaryMonitor();
-        }
-
         // No-fullscreen window creation
         bool requestWindowedFullscreen = (CORE.Window.screen.height == 0) && (CORE.Window.screen.width == 0);
 
@@ -1543,7 +1563,7 @@ int InitPlatform(void)
         int creationWidth = CORE.Window.screen.width != 0 ? CORE.Window.screen.width : 1;
         int creationHeight = CORE.Window.screen.height != 0 ? CORE.Window.screen.height : 1;
 
-        platform.handle = glfwCreateWindow(creationWidth, creationHeight, (CORE.Window.title != 0)? CORE.Window.title : " ", monitor, NULL);
+        platform.handle = glfwCreateWindow(creationWidth, creationHeight, (CORE.Window.title != 0)? CORE.Window.title : " ", NULL, NULL);
         if (!platform.handle)
         {
             glfwTerminate();
@@ -1553,26 +1573,23 @@ int InitPlatform(void)
 
         // After the window was created, determine the monitor that the window manager assigned.
         // Derive display sizes, and, if possible, window size in case it was zero at beginning.
-        if (monitor == NULL)
+        int monitorCount = 0;
+        int monitorIndex = GetCurrentMonitor();
+        GLFWmonitor **monitors = glfwGetMonitors(&monitorCount);
+
+        if (monitorIndex < monitorCount)
         {
-            int monitorCount = 0;
-            int monitorIndex = GetCurrentMonitor();
-            GLFWmonitor **monitors = glfwGetMonitors(&monitorCount);
+            monitor = monitors[monitorIndex];
+            SetDimensionsFromMonitor(monitor);
 
-            if (monitorIndex < monitorCount)
-            {
-                monitor = monitors[monitorIndex];
-                SetDimensionsFromMonitor(monitor);
-
-                if (requestWindowedFullscreen) glfwSetWindowSize(platform.handle, CORE.Window.screen.width, CORE.Window.screen.height);
-            }
-            else
-            {
-                // The monitor for the window-manager-created window can not be determined, so it can not be centered.
-                glfwTerminate();
-                TRACELOG(LOG_WARNING, "GLFW: Failed to determine Monitor to center Window");
-                return -1;
-            }
+            if (requestWindowedFullscreen) glfwSetWindowSize(platform.handle, CORE.Window.screen.width, CORE.Window.screen.height);
+        }
+        else
+        {
+            // The monitor for the window-manager-created window can not be determined, so it can not be centered.
+            glfwTerminate();
+            TRACELOG(LOG_WARNING, "GLFW: Failed to determine Monitor to center Window");
+            return -1;
         }
 
         CORE.Window.render.width = CORE.Window.screen.width;
